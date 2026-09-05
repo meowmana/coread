@@ -233,7 +233,7 @@ const StudyApp: React.FC = () => {
     const [showUpload, setShowUpload] = useState(false);
     const [uploadTitle, setUploadTitle] = useState('');
     const [uploadText, setUploadText] = useState('');
-    const [pdfBase64, setPdfBase64] = useState('');
+    const [uploadFile, setUploadFile] = useState<File | null>(null);
     const [uploadFileName, setUploadFileName] = useState('');
     const [uploading, setUploading] = useState(false);
     const fileInputRef = useRef<HTMLInputElement>(null);
@@ -477,6 +477,7 @@ const StudyApp: React.FC = () => {
     };
 
     const openBook = async (book: Book) => {
+        api.touchBookOpen(book.id).catch(() => {});
         setActiveBook(book); setMode('reading');
         setReadingLoading(true);
         setPage(1); setTotalPages(1); setPageBreaks([{ paraIndex: 0, offset: 0 }]); setPageFragments([]); setPaginateProgress(null);
@@ -1109,35 +1110,14 @@ const StudyApp: React.FC = () => {
         }
     }, [showToc, currentChapterIdx]);
 
+    // 二进制直传：选文件只存File对象，编码探测（utf8/gbk）挪到服务端
     const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
         const file = e.target.files?.[0];
         if (!file) return;
         const name = file.name.replace(/\.(pdf|txt|md|epub)$/i, '');
         if (!uploadTitle) setUploadTitle(name);
         setUploadFileName(file.name);
-        const ext = file.name.toLowerCase().split('.').pop();
-
-        if (ext === 'pdf' || ext === 'epub') {
-            const reader = new FileReader();
-            reader.onload = () => {
-                const b64 = (reader.result as string).split(',')[1];
-                setPdfBase64(b64); setUploadText('');
-            };
-            reader.readAsDataURL(file);
-        } else {
-            file.arrayBuffer().then(buf => {
-                const bytes = new Uint8Array(buf);
-                let text: string;
-                try {
-                    const utf8 = new TextDecoder('utf-8', { fatal: true });
-                    text = utf8.decode(bytes);
-                } catch {
-                    const gbk = new TextDecoder('gbk');
-                    text = gbk.decode(bytes);
-                }
-                setUploadText(text); setPdfBase64('');
-            });
-        }
+        setUploadFile(file); setUploadText('');
     };
 
     const handleBatchUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -1151,16 +1131,7 @@ const StudyApp: React.FC = () => {
             if (!['epub', 'pdf', 'txt', 'md'].includes(ext || '')) { fail++; continue; }
             try {
                 const title = file.name.replace(/\.(pdf|txt|md|epub)$/i, '');
-                const b64 = await new Promise<string>((resolve) => {
-                    const reader = new FileReader();
-                    reader.onload = () => resolve((reader.result as string).split(',')[1]);
-                    reader.readAsDataURL(file);
-                });
-                const payload: any = { title };
-                if (ext === 'epub') { payload.format = 'epub'; payload.data = b64; }
-                else if (ext === 'pdf') { payload.format = 'pdf'; payload.data = b64; }
-                else { payload.content = atob(b64); }
-                await api.createBook(payload);
+                await api.uploadBookFile(file, title, ext || 'txt');
                 ok++;
                 toast(`已上传 ${ok}/${files.length}: ${title}`);
             } catch { fail++; }
@@ -1174,15 +1145,16 @@ const StudyApp: React.FC = () => {
 
     const handleUpload = async () => {
         if (!uploadTitle.trim()) { toast('请输入书名'); return; }
-        if (!uploadText && !pdfBase64) { toast('请选择文件或粘贴文本'); return; }
+        if (!uploadText && !uploadFile) { toast('请选择文件或粘贴文本'); return; }
         setUploading(true);
         try {
-            const payload: any = { title: uploadTitle.trim() };
-            if (pdfBase64 && uploadFileName.toLowerCase().endsWith('.epub')) { payload.format = 'epub'; payload.data = pdfBase64; }
-            else if (pdfBase64) { payload.format = 'pdf'; payload.data = pdfBase64; }
-            else { payload.content = uploadText; }
-            await api.createBook(payload);
-            setShowUpload(false); setUploadTitle(''); setUploadText(''); setPdfBase64(''); setUploadFileName('');
+            if (uploadFile) {
+                const ext = uploadFileName.toLowerCase().split('.').pop() || 'txt';
+                await api.uploadBookFile(uploadFile, uploadTitle.trim(), ext);
+            } else {
+                await api.createBook({ title: uploadTitle.trim(), content: uploadText });
+            }
+            setShowUpload(false); setUploadTitle(''); setUploadText(''); setUploadFile(null); setUploadFileName('');
             toast('上传成功');
             loadBooks();
         } catch (e: any) { toast(`上传失败: ${e.message}`); }

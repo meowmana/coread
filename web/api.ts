@@ -27,6 +27,15 @@ export const api = {
     request(`/v1/books/${bookId}/progress`, { method: 'PATCH', body: JSON.stringify({ page }) }),
   createBook: (data: any) =>
     request('/v1/books', { method: 'POST', body: JSON.stringify(data) }),
+  // 二进制直传：文件原始字节直接做body，不再base64进JSON（省33%传输+双端编解码）
+  uploadBookFile: (file: Blob, title: string, format: string) =>
+    request(`/v1/books?${new URLSearchParams({ title, format })}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/octet-stream', 'x-owner-key': ROOM_OWNER_KEY },
+      body: file,
+    }),
+  touchBookOpen: (bookId: number) =>
+    request(`/v1/books/${bookId}/open`, { method: 'POST' }),
   deleteBook: (bookId: number) =>
     request(`/v1/books/${bookId}`, { method: 'DELETE' }),
   fetchBookToc: (bookId: number) =>

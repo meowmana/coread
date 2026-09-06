@@ -11,6 +11,7 @@
     "start": "node server.mjs",
     "dev": "npx vite",
     "build": "npx vite build",
+    "test": "node --test",
     "mcp": "node mcp-stdio.mjs",
     "mcp:sse": "node mcp-sse.mjs"
   },

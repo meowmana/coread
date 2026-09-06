@@ -36,6 +36,19 @@ export const api = {
     }),
   touchBookOpen: (bookId: number) =>
     request(`/v1/books/${bookId}/open`, { method: 'POST' }),
+  recordReadingTime: (bookId: number, seconds: number, readingDate: string) =>
+    request(`/v1/books/${bookId}/reading-time`, {
+      method: 'POST', keepalive: true,
+      body: JSON.stringify({ seconds, reading_date: readingDate }),
+    }),
+  markBookFinished: (bookId: number, finishedDate: string) =>
+    request(`/v1/books/${bookId}/finish`, {
+      method: 'POST', body: JSON.stringify({ finished_date: finishedDate }),
+    }),
+  fetchReadingStats: (today: string) =>
+    request(`/v1/reading-stats?today=${encodeURIComponent(today)}`),
+  addReadingNote: (data: { content: string; book_id?: number; reading_date?: string; from_who?: string }) =>
+    request('/v1/reading-notes', { method: 'POST', body: JSON.stringify(data) }),
   deleteBook: (bookId: number) =>
     request(`/v1/books/${bookId}`, { method: 'DELETE' }),
   fetchBookToc: (bookId: number) =>

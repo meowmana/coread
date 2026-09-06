@@ -1,0 +1,20 @@
+{
+  "name": "共读室 · CoRead",
+  "short_name": "共读室",
+  "description": "AI 与人类共享批注的私人阅读室",
+  "lang": "zh-CN",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#f7f4f0",
+  "theme_color": "#756d91",
+  "icons": [
+    {
+      "src": "/coread-icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

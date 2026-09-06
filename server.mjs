@@ -43,7 +43,7 @@ initDb(DB_PATH);
 
 const MIME = {
   '.html': 'text/html', '.js': 'application/javascript', '.css': 'text/css',
-  '.json': 'application/json', '.png': 'image/png', '.jpg': 'image/jpeg',
+  '.json': 'application/json', '.webmanifest': 'application/manifest+json', '.png': 'image/png', '.jpg': 'image/jpeg',
   '.svg': 'image/svg+xml', '.ico': 'image/x-icon', '.woff2': 'font/woff2',
 };
 

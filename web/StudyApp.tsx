@@ -22,9 +22,31 @@ function themeColors(h: number, s: number, l: number) {
     return { primary, primaryLight, primaryBg, primaryBorder, primaryDark, warmAccent, warmBg, grad1, grad2, grad3, shenColor, shenBg, tongColor, tongBg, shenHL, tongHL };
 }
 
-interface Book { id: number; title: string; total_paragraphs: number; created_at: string; current_page: number | null; comment_count: number; }
+interface Book {
+    id: number;
+    title: string;
+    total_paragraphs: number;
+    created_at: string;
+    current_page: number | null;
+    comment_count: number;
+    cover_image?: string | null;
+    last_read_at?: string | null;
+    last_opened_at?: string | null;
+    finished_at?: string | null;
+}
 interface Paragraph { idx: number; content: string; }
 interface Comment { id: number; book_id: number; paragraph_idx: number; sel_end_para_idx: number | null; sel_start_idx: number | null; sel_end_idx: number | null; selected_text: string | null; from_who: string; content: string; created_at: string; reply_to: number | null; }
+interface ReadingStats {
+    today: string;
+    today_seconds: number;
+    total_seconds: number;
+    currentStreak: number;
+    longestStreak: number;
+    readingDays: number;
+    daily: { reading_date: string; seconds: number }[];
+    books: { id: number; title: string; total_seconds: number; finished_at: string | null; last_read_at: string | null }[];
+    notes: { id: number; book_id: number | null; book_title: string | null; reading_date: string | null; from_who: string; content: string; created_at: string }[];
+}
 interface PageBreak { paraIndex: number; offset: number; }
 interface PageFragment extends Paragraph { sourceIdx: number; startOffset: number; endOffset: number; isPartialStart: boolean; isPartialEnd: boolean; }
 interface ReplyNotice {
@@ -85,6 +107,22 @@ function decodeEntities(s: string): string {
 const PARA_GAP = 18;
 const CHAPTER_GAP_TOP = 40;
 const CHAPTER_GAP_BOTTOM = 28;
+
+function localDateString(date = new Date()): string {
+    const year = date.getFullYear();
+    const month = String(date.getMonth() + 1).padStart(2, '0');
+    const day = String(date.getDate()).padStart(2, '0');
+    return `${year}-${month}-${day}`;
+}
+
+function formatReadingTime(seconds: number): string {
+    const minutes = Math.floor(Number(seconds || 0) / 60);
+    if (minutes < 1) return '不足 1 分钟';
+    if (minutes < 60) return `${minutes} 分钟`;
+    const hours = Math.floor(minutes / 60);
+    const rest = minutes % 60;
+    return rest ? `${hours} 小时 ${rest} 分钟` : `${hours} 小时`;
+}
 
 // 大书（对齐SullyOS共读室 v2.2.24）：不做窗口化——全局连续视觉分页。
 // 超阈值的书首开走渐进分页：分块测量（块间让出主线程不卡UI）+ 完成后写分页缓存，之后秒开。
@@ -246,6 +284,9 @@ const StudyApp: React.FC = () => {
     const [humanName, setHumanName] = useState(() => localStorage.getItem('coread-human-name') || 'human');
     const [aiName, setAiName] = useState(() => localStorage.getItem('coread-ai-name') || 'AI');
     const [showSettings, setShowSettings] = useState(false);
+    const [showReadingStats, setShowReadingStats] = useState(false);
+    const [readingStats, setReadingStats] = useState<ReadingStats | null>(null);
+    const [readingStatsLoading, setReadingStatsLoading] = useState(false);
     const [readerFontSize, setReaderFontSize] = useState(() => parseInt(localStorage.getItem('coread-font-size') || '14', 10));
     const [showFontPanel, setShowFontPanel] = useState(false);
     const [readerBrightness, setReaderBrightness] = useState(() => parseInt(localStorage.getItem('coread-brightness') || '100', 10));
@@ -258,6 +299,9 @@ const StudyApp: React.FC = () => {
     };
     const barTimer = useRef<any>(null);
     const touchStart = useRef<{ x: number; y: number; t: number } | null>(null);
+    const suppressTapRef = useRef(false);
+    const suppressTapTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const readingLastTickRef = useRef<number | null>(null);
 
     const toggleBar = () => {
         if (activeComments.length > 0) { setActiveComments([]); return; }
@@ -276,14 +320,52 @@ const StudyApp: React.FC = () => {
     useEffect(() => { commentsRef.current = comments; }, [comments]);
     useEffect(() => { allCommentsRef.current = allComments; }, [allComments]);
 
+    // Count only time when the reading view is actually in the foreground.
+    // Thirty-second heartbeats keep losses small if the browser is closed abruptly;
+    // elapsed time is capped so a suspended tab can never add hours on resume.
+    useEffect(() => {
+        if (mode !== 'reading' || !activeBook || readingLoading) {
+            readingLastTickRef.current = null;
+            return;
+        }
+        const bookId = activeBook.id;
+        readingLastTickRef.current = document.visibilityState === 'visible' ? Date.now() : null;
+
+        const flush = (force = false) => {
+            const startedAt = readingLastTickRef.current;
+            if (startedAt == null || (!force && document.visibilityState !== 'visible')) return;
+            const now = Date.now();
+            const seconds = Math.min(60, Math.floor((now - startedAt) / 1000));
+            readingLastTickRef.current = now;
+            if (seconds > 0) api.recordReadingTime(bookId, seconds, localDateString(new Date(startedAt))).catch(() => {});
+        };
+        const onVisibilityChange = () => {
+            if (document.visibilityState === 'hidden') {
+                flush(true);
+                readingLastTickRef.current = null;
+            } else {
+                readingLastTickRef.current = Date.now();
+            }
+        };
+        const onPageHide = () => flush(true);
+        const timer = window.setInterval(flush, 30000);
+        document.addEventListener('visibilitychange', onVisibilityChange);
+        window.addEventListener('pagehide', onPageHide);
+        return () => {
+            flush();
+            window.clearInterval(timer);
+            document.removeEventListener('visibilitychange', onVisibilityChange);
+            window.removeEventListener('pagehide', onPageHide);
+            readingLastTickRef.current = null;
+        };
+    }, [mode, activeBook?.id, readingLoading]);
+
     const lastCommentIds = useRef('');
     useEffect(() => {
         if (mode !== 'reading' || !activeBook) return;
         const interval = setInterval(async () => {
             try {
-                const vh = window.innerHeight || 700;
-                const pp = Math.max(12, Math.min(28, Math.floor((vh - 120) / 26)));
-                const d = await api.fetchBookDetail(activeBook.id, page, pp);
+                const d = await api.fetchBookDetail(activeBook.id, page);
                 if (d.comments) {
                     const newIds = d.comments.map((c: any) => c.id).join(',');
                     if (newIds !== lastCommentIds.current) {
@@ -474,6 +556,14 @@ const StudyApp: React.FC = () => {
         try { const d = await api.fetchBooks(); setBooks(d.books || []); }
         catch (e: any) { setError(e.message); }
         setLoading(false);
+    };
+
+    const openReadingStats = async () => {
+        setShowReadingStats(true);
+        setReadingStatsLoading(true);
+        try { setReadingStats(await api.fetchReadingStats(localDateString())); }
+        catch (e: any) { toast(`阅读记录加载失败: ${e.message}`); }
+        setReadingStatsLoading(false);
     };
 
     const openBook = async (book: Book) => {
@@ -995,6 +1085,7 @@ const StudyApp: React.FC = () => {
             setActiveComments([]); setCommentingIdx(null); setSelRange(null); setFloatingBar(null);
             setPage(next);
             if (next === totalPages && totalPages > 1) {
+                api.markBookFinished(activeBook.id, localDateString()).catch(() => {});
                 const bookTitle = activeBook.title?.replace(/\s*\(.*?\)\s*/g, '').trim();
                 fetch('/v1/reading-wishlist').then(r => r.json()).then(res => {
                     const match = (res.items || []).find((w: any) => w.status === 'reading' && w.title?.trim() === bookTitle);
@@ -1007,6 +1098,36 @@ const StudyApp: React.FC = () => {
                 }).catch(() => {});
             }
         }
+    };
+
+    const handleContentClick = (e: React.MouseEvent<HTMLDivElement>) => {
+        if (mode !== 'reading') {
+            if (activeComments.length) setActiveComments([]);
+            return;
+        }
+
+        // Touch browsers commonly emit a click after touchend. A completed swipe
+        // already changed the page, so ignore that synthetic click.
+        if (suppressTapRef.current) {
+            suppressTapRef.current = false;
+            if (suppressTapTimer.current) clearTimeout(suppressTapTimer.current);
+            suppressTapTimer.current = null;
+            return;
+        }
+
+        const target = e.target as HTMLElement;
+        if (target.closest('button, a, input, textarea, select, [role="button"], [data-reader-interactive]')) return;
+
+        // Finishing a mouse drag or long-press selection can also emit a click.
+        // Keep annotation selection intact instead of accidentally turning a page.
+        const selection = window.getSelection();
+        if (selection && !selection.isCollapsed && selection.toString().trim()) return;
+
+        const rect = e.currentTarget.getBoundingClientRect();
+        const tapPosition = rect.width > 0 ? (e.clientX - rect.left) / rect.width : 0.5;
+        if (tapPosition < 0.3) goPage(-1);
+        else if (tapPosition > 0.7) goPage(1);
+        else toggleBar();
     };
 
     const startAnnotation = () => {
@@ -1282,6 +1403,9 @@ const StudyApp: React.FC = () => {
                     <button onClick={() => { setEditMode(!editMode); setSelectedBooks(new Set()); }} style={btnBase}>
                         <span style={{ fontSize: 12, color: editMode ? '#e55' : c.primary, fontWeight: 600 }}>{editMode ? '完成' : '管理'}</span>
                     </button>
+                    <button onClick={openReadingStats} style={btnBase} aria-label="阅读记录" title="阅读记录">
+                        <span style={{ fontSize: 12, color: c.primary, fontWeight: 600 }}>记录</span>
+                    </button>
                     <button onClick={() => setShowSettings(true)} style={btnBase}>
                         <span style={{ fontSize: 14, color: c.primary }}>⚙</span>
                     </button>
@@ -1294,9 +1418,9 @@ const StudyApp: React.FC = () => {
                     {/* Persistent book title — always visible, small grey text */}
                     <div style={{
                         paddingTop: 'calc(12px + env(safe-area-inset-top))', paddingLeft: 20, paddingRight: 20, paddingBottom: 6, textAlign: 'center', flexShrink: 0,
-                        background: '#fafaf8',
+                        background: readerNightMode ? '#1a1a1a' : '#fafaf8',
                     }}>
-                        <div style={{ fontSize: 11, color: '#aaa', letterSpacing: 0.5, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                        <div style={{ fontSize: 11, color: readerNightMode ? '#777' : '#aaa', letterSpacing: 0.5, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                             {activeBook?.title || ''}
                         </div>
                     </div>
@@ -1307,7 +1431,7 @@ const StudyApp: React.FC = () => {
                         transition: 'opacity 0.3s ease, transform 0.3s ease',
                         pointerEvents: showBar ? 'auto' : 'none',
                     }}>
-                        <button onClick={backToShelf} style={btnBase}>
+                        <button onClick={backToShelf} style={{ ...btnBase, background: readerNightMode ? 'rgba(45,45,45,0.85)' : btnBase.background }}>
                             <span style={{ fontSize: 16, color: c.primary }}>✕</span>
                         </button>
                     </div>
@@ -1319,8 +1443,11 @@ const StudyApp: React.FC = () => {
                 flex: 1, overflow: mode === 'reading' ? 'hidden' : 'auto', position: 'relative',
                 padding: mode === 'reading' ? '0' : '8px 20px 32px',
                 background: mode === 'reading' ? (readerNightMode ? '#1a1a1a' : '#fafaf8') : 'transparent',
+                touchAction: mode === 'reading' ? 'pan-y' : undefined,
+                overscrollBehaviorX: mode === 'reading' ? 'none' : undefined,
+                WebkitTapHighlightColor: mode === 'reading' ? 'transparent' : undefined,
             }} className="no-scrollbar study-scroll-container"
-                onClick={() => { if (mode === 'reading') toggleBar(); else if (activeComments.length) setActiveComments([]); }}
+                onClick={handleContentClick}
                 onTouchStart={mode === 'reading' ? (e) => {
                     touchStart.current = { x: e.touches[0].clientX, y: e.touches[0].clientY, t: Date.now() };
                 } : undefined}
@@ -1331,6 +1458,12 @@ const StudyApp: React.FC = () => {
                     const dt = Date.now() - touchStart.current.t;
                     touchStart.current = null;
                     if (dt > 500 || Math.abs(dy) > Math.abs(dx) || Math.abs(dx) < 60) return;
+                    suppressTapRef.current = true;
+                    if (suppressTapTimer.current) clearTimeout(suppressTapTimer.current);
+                    suppressTapTimer.current = setTimeout(() => {
+                        suppressTapRef.current = false;
+                        suppressTapTimer.current = null;
+                    }, 500);
                     if (dx < -60) goPage(1);
                     else if (dx > 60) goPage(-1);
                 } : undefined}>
@@ -1351,7 +1484,13 @@ const StudyApp: React.FC = () => {
                                 <div style={{ fontSize: 12, color: '#ccc' }}>点右上角 + 上传一本书</div>
                             </div>
                         ) : (
-                            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 12 }}>
+                            <div style={{
+                                display: 'grid',
+                                gridTemplateColumns: 'repeat(auto-fill, minmax(104px, 148px))',
+                                columnGap: 16,
+                                rowGap: 18,
+                                justifyContent: 'start',
+                            }}>
                                 {[...books].sort((a, b) => {
                                     const aTime = a.last_read_at ? new Date(a.last_read_at).getTime() : 0;
                                     const bTime = b.last_read_at ? new Date(b.last_read_at).getTime() : 0;
@@ -1752,6 +1891,86 @@ const StudyApp: React.FC = () => {
                 </>
             )}
 
+            {/* Reading history overlay */}
+            {showReadingStats && (
+                <div style={{ position: 'absolute', inset: 0, background: 'rgba(35,31,43,0.34)', backdropFilter: 'blur(5px)', zIndex: 32, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 18 }}
+                    onClick={() => setShowReadingStats(false)}>
+                    <div onClick={e => e.stopPropagation()} style={{ background: '#fffdfb', borderRadius: 22, width: '100%', maxWidth: 430, maxHeight: '84%', overflowY: 'auto', boxShadow: '0 12px 44px rgba(42,35,55,0.2)', padding: '22px 20px 24px' }}>
+                        <div style={{ display: 'flex', alignItems: 'center', marginBottom: 18 }}>
+                            <div style={{ flex: 1 }}>
+                                <div style={{ fontSize: 17, fontWeight: 750, color: c.primaryDark }}>阅读记录</div>
+                                <div style={{ fontSize: 11, color: '#aaa', marginTop: 3 }}>每一分钟，都会留在这里</div>
+                            </div>
+                            <button onClick={() => setShowReadingStats(false)} style={{ ...btnBase, width: 32, height: 32, borderRadius: 12 }}>
+                                <span style={{ color: c.primary, fontSize: 17 }}>×</span>
+                            </button>
+                        </div>
+
+                        {readingStatsLoading ? (
+                            <div style={{ textAlign: 'center', color: '#bbb', fontSize: 13, padding: '36px 0' }}>正在整理阅读足迹...</div>
+                        ) : readingStats ? (
+                            <>
+                                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 8, marginBottom: 22 }}>
+                                    {[
+                                        { value: `${readingStats.currentStreak} 天`, label: '连续阅读' },
+                                        { value: formatReadingTime(readingStats.today_seconds), label: '今日阅读' },
+                                        { value: formatReadingTime(readingStats.total_seconds), label: '累计阅读' },
+                                    ].map(item => (
+                                        <div key={item.label} style={{ background: c.primaryBg, border: `1px solid ${c.primaryBorder}`, borderRadius: 14, padding: '12px 7px', textAlign: 'center' }}>
+                                            <div style={{ fontSize: 15, fontWeight: 750, color: c.primaryDark, lineHeight: 1.25 }}>{item.value}</div>
+                                            <div style={{ fontSize: 10, color: '#aaa', marginTop: 5 }}>{item.label}</div>
+                                        </div>
+                                    ))}
+                                </div>
+
+                                <div style={{ fontSize: 12, fontWeight: 700, color: c.primaryDark, marginBottom: 8 }}>最近阅读</div>
+                                {readingStats.daily.length ? (
+                                    <div style={{ marginBottom: 20, borderTop: `1px solid ${c.primaryBorder}` }}>
+                                        {readingStats.daily.slice(0, 14).map(day => (
+                                            <div key={day.reading_date} style={{ display: 'flex', justifyContent: 'space-between', padding: '9px 2px', borderBottom: `1px solid ${c.primaryBorder}`, fontSize: 11 }}>
+                                                <span style={{ color: '#777' }}>{day.reading_date}</span>
+                                                <span style={{ color: c.primary, fontWeight: 600 }}>{formatReadingTime(day.seconds)}</span>
+                                            </div>
+                                        ))}
+                                    </div>
+                                ) : <div style={{ fontSize: 11, color: '#bbb', marginBottom: 20 }}>还没有累计满一分钟的阅读记录。</div>}
+
+                                <div style={{ fontSize: 12, fontWeight: 700, color: c.primaryDark, marginBottom: 8 }}>书籍足迹</div>
+                                {readingStats.books.length ? (
+                                    <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 20 }}>
+                                        {readingStats.books.map(book => (
+                                            <div key={book.id} style={{ background: '#fff', border: `1px solid ${c.primaryBorder}`, borderRadius: 13, padding: '10px 12px' }}>
+                                                <div style={{ fontSize: 12, fontWeight: 650, color: '#4a4354', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{book.title}</div>
+                                                <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, fontSize: 10, color: '#aaa', marginTop: 5 }}>
+                                                    <span>阅读 {formatReadingTime(book.total_seconds)}</span>
+                                                    {book.finished_at && <span style={{ color: c.primary }}>读完于 {book.finished_at}</span>}
+                                                </div>
+                                            </div>
+                                        ))}
+                                    </div>
+                                ) : <div style={{ fontSize: 11, color: '#bbb', marginBottom: 20 }}>读过的书会出现在这里。</div>}
+
+                                <div style={{ fontSize: 12, fontWeight: 700, color: c.primaryDark, marginBottom: 8 }}>共读批注</div>
+                                {readingStats.notes.length ? (
+                                    <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                                        {readingStats.notes.map(note => (
+                                            <div key={note.id} style={{ borderLeft: `3px solid ${c.primary}`, background: c.primaryBg, borderRadius: '3px 12px 12px 3px', padding: '10px 12px' }}>
+                                                <div style={{ fontSize: 10, color: '#aaa', marginBottom: 4 }}>
+                                                    {displayName(note.from_who)}{note.book_title ? ` · 《${note.book_title}》` : ''}{note.reading_date ? ` · ${note.reading_date}` : ''}
+                                                </div>
+                                                <div style={{ fontSize: 12, color: '#51495d', lineHeight: 1.55, whiteSpace: 'pre-wrap' }}>{note.content}</div>
+                                            </div>
+                                        ))}
+                                    </div>
+                                ) : <div style={{ fontSize: 11, color: '#bbb' }}>哥哥以后可以在这里给你的阅读记录留话。</div>}
+                            </>
+                        ) : (
+                            <div style={{ textAlign: 'center', color: '#bbb', fontSize: 12, padding: '30px 0' }}>暂时无法读取记录。</div>
+                        )}
+                    </div>
+                </div>
+            )}
+
             {/* Settings overlay */}
             {showSettings && (
                 <div style={{ position: 'absolute', inset: 0, background: 'rgba(0,0,0,0.3)', backdropFilter: 'blur(4px)', zIndex: 30, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20 }}
@@ -1801,7 +2020,7 @@ const StudyApp: React.FC = () => {
 
                         <div style={{ textAlign: 'center', fontSize: 11, color: '#ccc', margin: '4px 0 8px' }}>— 或者 —</div>
 
-                        <textarea value={uploadText} onChange={e => { setUploadText(e.target.value); setPdfBase64(''); setUploadFileName(''); }}
+                        <textarea value={uploadText} onChange={e => { setUploadText(e.target.value); setUploadFile(null); setUploadFileName(''); }}
                             placeholder="粘贴文本内容...（段落之间用空行分隔）"
                             style={{ width: '100%', minHeight: 100, padding: '10px 14px', borderRadius: 12, border: `1px solid ${c.primaryBorder}`, fontSize: 13, outline: 'none', resize: 'vertical', background: c.primaryBg, color: '#333', lineHeight: 1.5 }} />
 

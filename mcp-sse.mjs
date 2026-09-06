@@ -7,6 +7,7 @@ import { tools, handleTool } from './lib/mcp-tools.mjs';
 
 const DB_PATH = process.env.COREAD_DB || path.join(process.cwd(), 'data', 'coread.db');
 const PORT = parseInt(process.env.COREAD_MCP_PORT || '3001');
+const HOST = process.env.COREAD_MCP_HOST || '127.0.0.1';
 initDb(DB_PATH);
 
 const sessions = new Map();
@@ -130,9 +131,9 @@ const server = http.createServer((req, res) => {
   res.end('Not found');
 });
 
-server.listen(PORT, () => {
+server.listen(PORT, HOST, () => {
   console.log(`\n  📚 coread MCP server (SSE + Streamable HTTP)`);
-  console.log(`  🔗 SSE:              http://localhost:${PORT}/sse`);
-  console.log(`  🔗 Streamable HTTP:  http://localhost:${PORT}/mcp`);
+  console.log(`  🔗 SSE:              http://${HOST}:${PORT}/sse`);
+  console.log(`  🔗 Streamable HTTP:  http://${HOST}:${PORT}/mcp`);
   console.log(`  📂 Database: ${DB_PATH}\n`);
 });

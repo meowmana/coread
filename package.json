@@ -23,6 +23,9 @@
     "ai"
   ],
   "license": "MIT",
+  "allowScripts": {
+    "better-sqlite3@12.11.1": true
+  },
   "dependencies": {
     "adm-zip": "^0.5.10",
     "archiver": "^7.0.0",

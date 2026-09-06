@@ -1484,7 +1484,13 @@ const StudyApp: React.FC = () => {
                                 <div style={{ fontSize: 12, color: '#ccc' }}>点右上角 + 上传一本书</div>
                             </div>
                         ) : (
-                            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 12 }}>
+                            <div style={{
+                                display: 'grid',
+                                gridTemplateColumns: 'repeat(auto-fill, minmax(104px, 148px))',
+                                columnGap: 16,
+                                rowGap: 18,
+                                justifyContent: 'start',
+                            }}>
                                 {[...books].sort((a, b) => {
                                     const aTime = a.last_read_at ? new Date(a.last_read_at).getTime() : 0;
                                     const bTime = b.last_read_at ? new Date(b.last_read_at).getTime() : 0;

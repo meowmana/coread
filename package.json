@@ -26,7 +26,7 @@
   "dependencies": {
     "adm-zip": "^0.5.10",
     "archiver": "^7.0.0",
-    "better-sqlite3": "^11.0.0"
+    "better-sqlite3": "^12.11.1"
   },
   "devDependencies": {
     "@types/react": "^19.2.16",

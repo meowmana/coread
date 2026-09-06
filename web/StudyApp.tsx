@@ -258,6 +258,8 @@ const StudyApp: React.FC = () => {
     };
     const barTimer = useRef<any>(null);
     const touchStart = useRef<{ x: number; y: number; t: number } | null>(null);
+    const suppressTapRef = useRef(false);
+    const suppressTapTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
     const toggleBar = () => {
         if (activeComments.length > 0) { setActiveComments([]); return; }
@@ -1009,6 +1011,36 @@ const StudyApp: React.FC = () => {
         }
     };
 
+    const handleContentClick = (e: React.MouseEvent<HTMLDivElement>) => {
+        if (mode !== 'reading') {
+            if (activeComments.length) setActiveComments([]);
+            return;
+        }
+
+        // Touch browsers commonly emit a click after touchend. A completed swipe
+        // already changed the page, so ignore that synthetic click.
+        if (suppressTapRef.current) {
+            suppressTapRef.current = false;
+            if (suppressTapTimer.current) clearTimeout(suppressTapTimer.current);
+            suppressTapTimer.current = null;
+            return;
+        }
+
+        const target = e.target as HTMLElement;
+        if (target.closest('button, a, input, textarea, select, [role="button"], [data-reader-interactive]')) return;
+
+        // Finishing a mouse drag or long-press selection can also emit a click.
+        // Keep annotation selection intact instead of accidentally turning a page.
+        const selection = window.getSelection();
+        if (selection && !selection.isCollapsed && selection.toString().trim()) return;
+
+        const rect = e.currentTarget.getBoundingClientRect();
+        const tapPosition = rect.width > 0 ? (e.clientX - rect.left) / rect.width : 0.5;
+        if (tapPosition < 0.3) goPage(-1);
+        else if (tapPosition > 0.7) goPage(1);
+        else toggleBar();
+    };
+
     const startAnnotation = () => {
         replyPageRef.current = page;
         if (!floatingBar) return;
@@ -1319,8 +1351,11 @@ const StudyApp: React.FC = () => {
                 flex: 1, overflow: mode === 'reading' ? 'hidden' : 'auto', position: 'relative',
                 padding: mode === 'reading' ? '0' : '8px 20px 32px',
                 background: mode === 'reading' ? (readerNightMode ? '#1a1a1a' : '#fafaf8') : 'transparent',
+                touchAction: mode === 'reading' ? 'pan-y' : undefined,
+                overscrollBehaviorX: mode === 'reading' ? 'none' : undefined,
+                WebkitTapHighlightColor: mode === 'reading' ? 'transparent' : undefined,
             }} className="no-scrollbar study-scroll-container"
-                onClick={() => { if (mode === 'reading') toggleBar(); else if (activeComments.length) setActiveComments([]); }}
+                onClick={handleContentClick}
                 onTouchStart={mode === 'reading' ? (e) => {
                     touchStart.current = { x: e.touches[0].clientX, y: e.touches[0].clientY, t: Date.now() };
                 } : undefined}
@@ -1331,6 +1366,12 @@ const StudyApp: React.FC = () => {
                     const dt = Date.now() - touchStart.current.t;
                     touchStart.current = null;
                     if (dt > 500 || Math.abs(dy) > Math.abs(dx) || Math.abs(dx) < 60) return;
+                    suppressTapRef.current = true;
+                    if (suppressTapTimer.current) clearTimeout(suppressTapTimer.current);
+                    suppressTapTimer.current = setTimeout(() => {
+                        suppressTapRef.current = false;
+                        suppressTapTimer.current = null;
+                    }, 500);
                     if (dx < -60) goPage(1);
                     else if (dx > 60) goPage(-1);
                 } : undefined}>

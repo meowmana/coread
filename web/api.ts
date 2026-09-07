@@ -15,7 +15,7 @@ async function request(path: string, opts?: RequestInit) {
 export const api = {
   fetchBooks: () => request('/v1/books'),
   fetchBookDetail: (bookId: number, page = 1) =>
-    // 统一坐标制：服务端固定分页（BOOK_PER_PAGE），不再传 per_page
+    // 服务端优先使用浏览器同步的真实页表；page 是阅读器显示页码。
     request(`/v1/books/${bookId}?page=${page}`),
   fetchBookSlice: (bookId: number, start = 0, count = 30) =>
     request(`/v1/books/${bookId}/slice?start=${start}&count=${count}`),
@@ -23,8 +23,13 @@ export const api = {
     request(`/v1/books/${bookId}/comment`, { method: 'POST', body: JSON.stringify(data) }),
   deleteBookComment: (commentId: number) =>
     request(`/v1/books/comment/${commentId}`, { method: 'DELETE' }),
-  updateBookProgress: (bookId: number, page: number) =>
-    request(`/v1/books/${bookId}/progress`, { method: 'PATCH', body: JSON.stringify({ page }) }),
+  syncBookPagination: (bookId: number, data: any) =>
+    request(`/v1/books/${bookId}/pagination`, { method: 'POST', body: JSON.stringify(data) }),
+  updateBookProgress: (bookId: number, paragraphIdx: number, paragraphOffset = 0) =>
+    request(`/v1/books/${bookId}/progress`, {
+      method: 'PATCH',
+      body: JSON.stringify({ paragraph_idx: paragraphIdx, paragraph_offset: paragraphOffset }),
+    }),
   createBook: (data: any) =>
     request('/v1/books', { method: 'POST', body: JSON.stringify(data) }),
   // 二进制直传：文件原始字节直接做body，不再base64进JSON（省33%传输+双端编解码）

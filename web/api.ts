@@ -8,11 +8,21 @@ async function request(path: string, opts?: RequestInit) {
     headers: { 'Content-Type': 'application/json', 'x-owner-key': ROOM_OWNER_KEY },
     ...opts,
   });
-  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+  if (!res.ok) throw Object.assign(new Error(`${res.status} ${res.statusText}`), { status: res.status });
   return res.json();
 }
 
 export const api = {
+  readingState: () => request('/v1/reading-state'),
+  backup: async (action: 'export' | 'preview' | 'restore', body: any) => {
+    const res = await fetch(`${BASE}/v1/backup/${action}`, { method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-owner-key': ROOM_OWNER_KEY, 'x-coread-backup': '1' }, body: JSON.stringify(body) });
+    const result = await res.json();
+    if (!res.ok) throw new Error(result.error || '备份操作失败');
+    return result;
+  },
+  recordReadingCheckpoint: (bookId: number, checkpoint: any) =>
+    request(`/v1/books/${bookId}/reading-time`, { method: 'POST', keepalive: true, body: JSON.stringify(checkpoint) }),
   fetchBooks: () => request('/v1/books'),
   fetchBookDetail: (bookId: number, page = 1) =>
     // 服务端优先使用浏览器同步的真实页表；page 是阅读器显示页码。

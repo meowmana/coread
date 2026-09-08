@@ -1,6 +1,9 @@
 
 import React, { useState, useEffect, useCallback, useRef, startTransition, useLayoutEffect, useMemo } from 'react';
 import { api } from './api';
+import { useReadingClock, flushReading } from './useReadingClock';
+import ReadingJournal, { duration } from './ReadingJournal';
+import BackupControls from './BackupControls';
 
 function themeColors(h: number, s: number, l: number) {
     const primary = `hsl(${h}, ${s}%, ${l}%)`;
@@ -143,7 +146,7 @@ const PROVISIONAL_WIN = 2500;
 // 或被清理→每次重开都重分页。localStorage 只作 IDB 不可用时的后手兜底。
 const idbOpen = (): Promise<IDBDatabase | null> => new Promise((resolve) => {
     try {
-        const req = indexedDB.open('study-reader-cache', 2);
+        const req = indexedDB.open(`study-reader-cache-${localStorage.getItem('coread-cache-generation') || 'original'}`, 2);
         req.onupgradeneeded = () => {
             const db = req.result;
             if (!db.objectStoreNames.contains('pagebreaks')) db.createObjectStore('pagebreaks');
@@ -308,7 +311,6 @@ const StudyApp: React.FC = () => {
     const touchStart = useRef<{ x: number; y: number; t: number } | null>(null);
     const suppressTapRef = useRef(false);
     const suppressTapTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-    const readingLastTickRef = useRef<number | null>(null);
 
     const toggleBar = () => {
         if (activeComments.length > 0) { setActiveComments([]); return; }
@@ -327,45 +329,9 @@ const StudyApp: React.FC = () => {
     useEffect(() => { commentsRef.current = comments; }, [comments]);
     useEffect(() => { allCommentsRef.current = allComments; }, [allComments]);
 
-    // Count only time when the reading view is actually in the foreground.
-    // Thirty-second heartbeats keep losses small if the browser is closed abruptly;
-    // elapsed time is capped so a suspended tab can never add hours on resume.
-    useEffect(() => {
-        if (mode !== 'reading' || !activeBook || readingLoading) {
-            readingLastTickRef.current = null;
-            return;
-        }
-        const bookId = activeBook.id;
-        readingLastTickRef.current = document.visibilityState === 'visible' ? Date.now() : null;
+    const readingClock = useReadingClock(activeBook?.id || null,
+        mode === 'reading' && !readingLoading && allParas.length > 0 && !showSettings && !showReadingStats);
 
-        const flush = (force = false) => {
-            const startedAt = readingLastTickRef.current;
-            if (startedAt == null || (!force && document.visibilityState !== 'visible')) return;
-            const now = Date.now();
-            const seconds = Math.min(60, Math.floor((now - startedAt) / 1000));
-            readingLastTickRef.current = now;
-            if (seconds > 0) api.recordReadingTime(bookId, seconds, localDateString(new Date(startedAt))).catch(() => {});
-        };
-        const onVisibilityChange = () => {
-            if (document.visibilityState === 'hidden') {
-                flush(true);
-                readingLastTickRef.current = null;
-            } else {
-                readingLastTickRef.current = Date.now();
-            }
-        };
-        const onPageHide = () => flush(true);
-        const timer = window.setInterval(flush, 30000);
-        document.addEventListener('visibilitychange', onVisibilityChange);
-        window.addEventListener('pagehide', onPageHide);
-        return () => {
-            flush();
-            window.clearInterval(timer);
-            document.removeEventListener('visibilitychange', onVisibilityChange);
-            window.removeEventListener('pagehide', onPageHide);
-            readingLastTickRef.current = null;
-        };
-    }, [mode, activeBook?.id, readingLoading]);
 
     const lastCommentIds = useRef('');
     useEffect(() => {
@@ -566,14 +532,18 @@ const StudyApp: React.FC = () => {
     };
 
     const openReadingStats = async () => {
+        window.dispatchEvent(new Event('coread-pause'));
         setShowReadingStats(true);
         setReadingStatsLoading(true);
-        try { setReadingStats(await api.fetchReadingStats(localDateString())); }
+        try { await flushReading(); setReadingStats(await api.fetchReadingStats(localDateString())); }
         catch (e: any) { toast(`阅读记录加载失败: ${e.message}`); }
         setReadingStatsLoading(false);
     };
 
+    const openRequest = useRef(0);
     const openBook = async (book: Book) => {
+        const requestId = ++openRequest.current;
+        window.dispatchEvent(new Event('coread-pause'));
         api.touchBookOpen(book.id).catch(() => {});
         setActiveBook(book); setMode('reading');
         setReadingLoading(true);
@@ -603,11 +573,13 @@ const StudyApp: React.FC = () => {
             // 段落内容也进 IndexedDB：二次打开跳过网络拉取（大书13万段逐块拉要约1-2分钟）
             try {
                 const cached = await idbGetParas(paraCacheKey);
+                if (requestId !== openRequest.current) return;
                 if (cached) {
                     const parsed = JSON.parse(cached);
                     if (parsed.totalParas === totalParas && Array.isArray(parsed.paragraphs) && parsed.paragraphs.length > 0) {
                         setAllParas(parsed.paragraphs);
                         const cachedComments = await idbGetParas(commentCacheKey);
+                        if (requestId !== openRequest.current) return;
                         const comments = cachedComments ? JSON.parse(cachedComments) : [];
                         setAllComments(comments);
                         setComments(comments);
@@ -624,6 +596,7 @@ const StudyApp: React.FC = () => {
                 const seenCommentIds = new Set<number>();
                 for (let start = 0; start < totalParas; start += PARA_FETCH_CHUNK) {
                     const d = await api.fetchBookSlice(book.id, start, PARA_FETCH_CHUNK);
+                    if (requestId !== openRequest.current) return;
                     rawParas.push(...(d.paragraphs || []));
                     for (const cmt of (d.comments || []) as Comment[]) {
                         if (!seenCommentIds.has(cmt.id)) { seenCommentIds.add(cmt.id); fetchedComments.push(cmt); }
@@ -652,8 +625,8 @@ const StudyApp: React.FC = () => {
                 idbSetParas(paraCacheKey, JSON.stringify({ paragraphs: filtered, totalParas })).catch(() => {});
                 idbSetParas(commentCacheKey, JSON.stringify(fetchedComments)).catch(() => {});
             }
-        } catch (e: any) { toast(`加载失败: ${e.message}`); setReadingLoading(false); }
-        api.fetchBookToc(book.id).then(d => setTocChapters(d.chapters || [])).catch(() => {});
+        } catch (e: any) { if (requestId === openRequest.current) { toast(`加载失败: ${e.message}`); setReadingLoading(false); } }
+        api.fetchBookToc(book.id).then(d => { if (requestId === openRequest.current) setTocChapters(d.chapters || []); }).catch(() => {});
     };
 
     const lockedHeightRef = useRef<number>(0);
@@ -1328,6 +1301,8 @@ const StudyApp: React.FC = () => {
     };
 
     const backToShelf = () => {
+        ++openRequest.current;
+        window.dispatchEvent(new Event('coread-pause'));
         setMode('shelf'); setActiveBook(null); setParagraphs([]); setComments([]);
         setActiveComments([]); setSelRange(null); setFloatingBar(null); setShowToc(false); setTocChapters([]);
         setReturnPoint(null);
@@ -1426,6 +1401,9 @@ const StudyApp: React.FC = () => {
                 <div style={{ position: 'absolute', bottom: 70, left: -70, width: 200, height: 200, borderRadius: '50%', background: `radial-gradient(circle, ${c.warmBg}34, transparent 68%)`, pointerEvents: 'none', filter: 'blur(12px)', opacity: 0.65 }} />
             </>}
 
+            {mode === 'reading' && !readingLoading && <div className={`session-clock ${readerNightMode ? 'dark' : ''}`} role="status">
+                本次阅读 {duration(readingClock.seconds)}{readingClock.error && ` · ${readingClock.error}`}
+            </div>}
             {/* Header — shelf always shows; reading mode header slides with toolbar */}
             {mode === 'shelf' ? (
                 <div style={{ display: 'flex', alignItems: 'center', gap: 10, paddingTop: 'calc(52px + env(safe-area-inset-top))', paddingLeft: 20, paddingRight: 20, paddingBottom: 12, flexShrink: 0 }}>
@@ -1451,7 +1429,7 @@ const StudyApp: React.FC = () => {
                     <button onClick={openReadingStats} style={btnBase} aria-label="阅读记录" title="阅读记录">
                         <span style={{ fontSize: 12, color: c.primary, fontWeight: 600 }}>记录</span>
                     </button>
-                    <button onClick={() => setShowSettings(true)} style={btnBase}>
+                    <button aria-label="设置" onClick={() => setShowSettings(true)} style={btnBase}>
                         <span style={{ fontSize: 14, color: c.primary }}>⚙</span>
                     </button>
                     <button onClick={() => setShowUpload(true)} style={btnBase}>
@@ -1476,7 +1454,7 @@ const StudyApp: React.FC = () => {
                         transition: 'opacity 0.3s ease, transform 0.3s ease',
                         pointerEvents: showBar ? 'auto' : 'none',
                     }}>
-                        <button onClick={backToShelf} style={{ ...btnBase, background: readerNightMode ? 'rgba(45,45,45,0.85)' : btnBase.background }}>
+                        <button aria-label="关闭书籍" onClick={backToShelf} style={{ ...btnBase, background: readerNightMode ? 'rgba(45,45,45,0.85)' : btnBase.background }}>
                             <span style={{ fontSize: 16, color: c.primary }}>✕</span>
                         </button>
                     </div>
@@ -1484,7 +1462,7 @@ const StudyApp: React.FC = () => {
             )}
 
             {/* Content */}
-            <div ref={contentRef} style={{
+            <div ref={contentRef} data-testid="reader-surface" data-display-page={page} style={{
                 flex: 1, overflow: mode === 'reading' ? 'hidden' : 'auto', position: 'relative',
                 padding: mode === 'reading' ? '0' : '8px 20px 32px',
                 background: mode === 'reading' ? (readerNightMode ? '#1a1a1a' : '#fafaf8') : 'transparent',
@@ -1936,91 +1914,14 @@ const StudyApp: React.FC = () => {
                 </>
             )}
 
-            {/* Reading history overlay */}
-            {showReadingStats && (
-                <div style={{ position: 'absolute', inset: 0, background: 'rgba(35,31,43,0.34)', backdropFilter: 'blur(5px)', zIndex: 32, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 18 }}
-                    onClick={() => setShowReadingStats(false)}>
-                    <div onClick={e => e.stopPropagation()} style={{ background: '#fffdfb', borderRadius: 22, width: '100%', maxWidth: 430, maxHeight: '84%', overflowY: 'auto', boxShadow: '0 12px 44px rgba(42,35,55,0.2)', padding: '22px 20px 24px' }}>
-                        <div style={{ display: 'flex', alignItems: 'center', marginBottom: 18 }}>
-                            <div style={{ flex: 1 }}>
-                                <div style={{ fontSize: 17, fontWeight: 750, color: c.primaryDark }}>阅读记录</div>
-                                <div style={{ fontSize: 11, color: '#aaa', marginTop: 3 }}>每一分钟，都会留在这里</div>
-                            </div>
-                            <button onClick={() => setShowReadingStats(false)} style={{ ...btnBase, width: 32, height: 32, borderRadius: 12 }}>
-                                <span style={{ color: c.primary, fontSize: 17 }}>×</span>
-                            </button>
-                        </div>
+            {showReadingStats && <ReadingJournal stats={readingStats} loading={readingStatsLoading} dark={readerNightMode} close={() => setShowReadingStats(false)} />}
 
-                        {readingStatsLoading ? (
-                            <div style={{ textAlign: 'center', color: '#bbb', fontSize: 13, padding: '36px 0' }}>正在整理阅读足迹...</div>
-                        ) : readingStats ? (
-                            <>
-                                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 8, marginBottom: 22 }}>
-                                    {[
-                                        { value: `${readingStats.currentStreak} 天`, label: '连续阅读' },
-                                        { value: formatReadingTime(readingStats.today_seconds), label: '今日阅读' },
-                                        { value: formatReadingTime(readingStats.total_seconds), label: '累计阅读' },
-                                    ].map(item => (
-                                        <div key={item.label} style={{ background: c.primaryBg, border: `1px solid ${c.primaryBorder}`, borderRadius: 14, padding: '12px 7px', textAlign: 'center' }}>
-                                            <div style={{ fontSize: 15, fontWeight: 750, color: c.primaryDark, lineHeight: 1.25 }}>{item.value}</div>
-                                            <div style={{ fontSize: 10, color: '#aaa', marginTop: 5 }}>{item.label}</div>
-                                        </div>
-                                    ))}
-                                </div>
-
-                                <div style={{ fontSize: 12, fontWeight: 700, color: c.primaryDark, marginBottom: 8 }}>最近阅读</div>
-                                {readingStats.daily.length ? (
-                                    <div style={{ marginBottom: 20, borderTop: `1px solid ${c.primaryBorder}` }}>
-                                        {readingStats.daily.slice(0, 14).map(day => (
-                                            <div key={day.reading_date} style={{ display: 'flex', justifyContent: 'space-between', padding: '9px 2px', borderBottom: `1px solid ${c.primaryBorder}`, fontSize: 11 }}>
-                                                <span style={{ color: '#777' }}>{day.reading_date}</span>
-                                                <span style={{ color: c.primary, fontWeight: 600 }}>{formatReadingTime(day.seconds)}</span>
-                                            </div>
-                                        ))}
-                                    </div>
-                                ) : <div style={{ fontSize: 11, color: '#bbb', marginBottom: 20 }}>还没有累计满一分钟的阅读记录。</div>}
-
-                                <div style={{ fontSize: 12, fontWeight: 700, color: c.primaryDark, marginBottom: 8 }}>书籍足迹</div>
-                                {readingStats.books.length ? (
-                                    <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 20 }}>
-                                        {readingStats.books.map(book => (
-                                            <div key={book.id} style={{ background: '#fff', border: `1px solid ${c.primaryBorder}`, borderRadius: 13, padding: '10px 12px' }}>
-                                                <div style={{ fontSize: 12, fontWeight: 650, color: '#4a4354', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{book.title}</div>
-                                                <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, fontSize: 10, color: '#aaa', marginTop: 5 }}>
-                                                    <span>阅读 {formatReadingTime(book.total_seconds)}</span>
-                                                    {book.finished_at && <span style={{ color: c.primary }}>读完于 {book.finished_at}</span>}
-                                                </div>
-                                            </div>
-                                        ))}
-                                    </div>
-                                ) : <div style={{ fontSize: 11, color: '#bbb', marginBottom: 20 }}>读过的书会出现在这里。</div>}
-
-                                <div style={{ fontSize: 12, fontWeight: 700, color: c.primaryDark, marginBottom: 8 }}>共读批注</div>
-                                {readingStats.notes.length ? (
-                                    <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                                        {readingStats.notes.map(note => (
-                                            <div key={note.id} style={{ borderLeft: `3px solid ${c.primary}`, background: c.primaryBg, borderRadius: '3px 12px 12px 3px', padding: '10px 12px' }}>
-                                                <div style={{ fontSize: 10, color: '#aaa', marginBottom: 4 }}>
-                                                    {displayName(note.from_who)}{note.book_title ? ` · 《${note.book_title}》` : ''}{note.reading_date ? ` · ${note.reading_date}` : ''}
-                                                </div>
-                                                <div style={{ fontSize: 12, color: '#51495d', lineHeight: 1.55, whiteSpace: 'pre-wrap' }}>{note.content}</div>
-                                            </div>
-                                        ))}
-                                    </div>
-                                ) : <div style={{ fontSize: 11, color: '#bbb' }}>哥哥以后可以在这里给你的阅读记录留话。</div>}
-                            </>
-                        ) : (
-                            <div style={{ textAlign: 'center', color: '#bbb', fontSize: 12, padding: '30px 0' }}>暂时无法读取记录。</div>
-                        )}
-                    </div>
-                </div>
-            )}
 
             {/* Settings overlay */}
             {showSettings && (
                 <div style={{ position: 'absolute', inset: 0, background: 'rgba(0,0,0,0.3)', backdropFilter: 'blur(4px)', zIndex: 30, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20 }}
                     onClick={() => setShowSettings(false)}>
-                    <div onClick={e => e.stopPropagation()} style={{ background: 'white', borderRadius: 20, padding: '24px 22px', width: '100%', maxWidth: 340, boxShadow: '0 8px 40px rgba(0,0,0,0.15)' }}>
+                    <div className={`settings-panel ${readerNightMode ? 'dark' : ''}`} onClick={e => e.stopPropagation()} style={{ borderRadius: 20, padding: '24px 22px', width: '100%', maxWidth: 380, boxShadow: '0 8px 40px rgba(0,0,0,0.15)' }}>
                         <div style={{ fontSize: 15, fontWeight: 700, color: c.primaryDark, marginBottom: 18 }}>设置 Settings</div>
                         <label style={{ fontSize: 12, color: '#888', display: 'block', marginBottom: 6 }}>我的名字 My Name</label>
                         <input value={humanName} onChange={e => { setHumanName(e.target.value); localStorage.setItem('coread-human-name', e.target.value); }}
@@ -2037,6 +1938,7 @@ const StudyApp: React.FC = () => {
                             <span style={{ fontSize: 12, color: '#aaa' }}>大</span>
                             <span style={{ fontSize: 12, color: c.primary, fontWeight: 600, minWidth: 28, textAlign: 'center' }}>{readerFontSize}px</span>
                         </div>
+                        <BackupControls />
                         <button onClick={() => setShowSettings(false)} style={{ width: '100%', padding: '10px 0', borderRadius: 14, background: c.primary, border: 'none', color: 'white', fontSize: 14, fontWeight: 600, cursor: 'pointer' }}>完成</button>
                     </div>
                 </div>

@@ -12,6 +12,8 @@
     "dev": "npx vite",
     "build": "npx vite build",
     "test": "node --test",
+    "test:e2e": "playwright test",
+    "check": "tsc -p web/tsconfig.json --noEmit && node --check server.mjs && node --check lib/backup.mjs && node --check lib/reading-events.mjs",
     "mcp": "node mcp-stdio.mjs",
     "mcp:sse": "node mcp-sse.mjs"
   },
@@ -32,6 +34,7 @@
     "better-sqlite3": "^12.11.1"
   },
   "devDependencies": {
+    "@playwright/test": "^1.63.0",
     "@types/react": "^19.2.16",
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^6.0.2",

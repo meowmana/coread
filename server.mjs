@@ -67,7 +67,7 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-server.listen(PORT, () => {
+server.listen(PORT, process.env.COREAD_HOST || '0.0.0.0', () => {
   console.log(`\n  📚 coread server running at http://localhost:${PORT}`);
   console.log(`  📂 Database: ${DB_PATH}`);
   console.log(`  🌐 Open http://localhost:${PORT} in your browser\n`);
